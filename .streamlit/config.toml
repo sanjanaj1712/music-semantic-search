@@ -1,0 +1,11 @@
+[theme]
+primaryColor = "#1DB954"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+# Streamlit's file watcher crawls transformers' lazy modules and floods the log
+# with harmless ModuleNotFoundError tracebacks; auto-reload isn't needed here.
+fileWatcherType = "none"
