@@ -26,6 +26,9 @@ embeddings = model.encode(songs["song_text"].tolist(), show_progress_bar=True)
 print(embeddings.shape)
 
 np.save(BASE_DIR / "song_embeddings.npy", embeddings)
-songs[["track_id", "track_name", "track_artist", "song_text", "track_popularity"]].to_csv(
+# Audio features are stored for mood-aware reranking (retrieval.MOOD_FEATURES);
+# they're never embedded.
+songs[["track_id", "track_name", "track_artist", "song_text", "track_popularity",
+       "energy", "valence", "danceability", "acousticness"]].to_csv(
     BASE_DIR / "song_metadata.csv", index=False
 )

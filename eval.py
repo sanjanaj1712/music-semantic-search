@@ -9,10 +9,14 @@ energy/speechiness above a threshold). This is a weak-label eval, not a
 substitute for real human judgments -- see DEFENSE.md for the honest version
 of that caveat.
 
-Ground truth is computed from the raw catalog (data/spotify_songs.csv), not
-from song_metadata.csv -- the ranker only ever sees song_text and
-track_popularity, so it can't "cheat" using the same genre/audio-feature
-columns the eval labels are built from.
+Ground truth is computed from the raw catalog (data/spotify_songs.csv). The
+semantic and popularity rankers only see song_text and track_popularity, so
+they can't "cheat" using the genre/audio-feature columns the labels are built
+from. The mood reranker is different: it *does* use energy, valence,
+danceability and acousticness, several of which also appear in the label
+rules, and its keyword list was written by the same person as these queries.
+Its gain here is therefore optimistic -- read it as "the mechanism works as
+intended", not as an independent measure of quality.
 
 Usage:
     python eval.py
@@ -20,7 +24,7 @@ Usage:
 import numpy as np
 import pandas as pd
 
-from retrieval import BASE_DIR, cosine_similarity, hybrid_rank, load_index, load_model, semantic_rank
+from retrieval import BASE_DIR, cosine_similarity, hybrid_rank, load_index, load_model, mood_targets, semantic_rank
 
 RAW_DATA_PATH = BASE_DIR / "data" / "spotify_songs.csv"
 K = 10
@@ -59,7 +63,7 @@ def ndcg_at_k(hits, k):
     return dcg / idcg if idcg > 0 else 0.0
 
 
-def evaluate(k=K, hybrid=True, alpha=0.8):
+def evaluate(k=K, hybrid=True, alpha=0.8, mood_weight=0.0):
     raw = pd.read_csv(RAW_DATA_PATH)
     labels = relevance_labels(raw)
 
@@ -75,7 +79,9 @@ def evaluate(k=K, hybrid=True, alpha=0.8):
         similarities = cosine_similarity(embeddings, query_embedding)
 
         if hybrid:
-            idx, _, _ = hybrid_rank(metadata, similarities, top_k=k, alpha=alpha)
+            idx, _, _ = hybrid_rank(
+                metadata, similarities, top_k=k, alpha=alpha, mood=mood_targets(query), mood_weight=mood_weight
+            )
         else:
             idx, _ = semantic_rank(metadata, similarities, top_k=k)
 
@@ -96,10 +102,14 @@ def evaluate(k=K, hybrid=True, alpha=0.8):
 
 
 def main():
-    for hybrid in (False, True):
-        label = "hybrid (semantic + popularity, alpha=0.8)" if hybrid else "semantic only (cosine similarity)"
+    configs = [
+        ("semantic only (cosine similarity)", dict(hybrid=False)),
+        ("hybrid (semantic + popularity, alpha=0.8)", dict(hybrid=True)),
+        ("hybrid + mood (alpha=0.8, mood_weight=0.3)", dict(hybrid=True, mood_weight=0.3)),
+    ]
+    for label, kwargs in configs:
         print(f"\n=== {label} ===")
-        results = evaluate(hybrid=hybrid)
+        results = evaluate(**kwargs)
         print(results.to_string(index=False))
         print("\nmean:")
         print(results[[f"precision@{K}", f"recall@{K}", f"ndcg@{K}"]].mean().to_string())
