@@ -1,6 +1,10 @@
-[theme]
+# Separate light/dark sections keep the accent color while still following the
+# viewer's light/dark preference (a single [theme] block would pin light mode).
+[theme.light]
 primaryColor = "#1DB954"
-font = "sans serif"
+
+[theme.dark]
+primaryColor = "#1DB954"
 
 [browser]
 gatherUsageStats = false

@@ -20,6 +20,13 @@ EXAMPLES = [
     "chill r&b for late night",
     "party reggaeton",
 ]
+# Plain-language labels for detected mood targets: (feature, direction) -> label
+MOOD_LABELS = {
+    ("energy", 1): "energetic", ("energy", -1): "calm",
+    ("valence", 1): "happy", ("valence", -1): "sad",
+    ("danceability", 1): "danceable", ("danceability", -1): "not danceable",
+    ("acousticness", 1): "acoustic", ("acousticness", -1): "electronic",
+}
 
 st.set_page_config(page_title="Semantic Music Search", page_icon="🎧", layout="centered")
 
@@ -40,9 +47,11 @@ st.markdown(
       .sub {font-size: 0.87rem; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
       .tag {display: inline-block; font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: 999px;
             background: rgba(29,185,84,0.14); color: #1DB954; margin-right: 0.3rem; margin-top: 0.3rem;}
-      .score {text-align: right; font-size: 0.75rem; opacity: 0.6; width: 5.5rem;}
+      .score {text-align: right; font-size: 0.75rem; opacity: 0.6; flex-shrink: 0; white-space: nowrap;}
       .bar {height: 4px; border-radius: 2px; background: rgba(128,128,128,0.18); margin-top: 0.3rem;}
       .bar > div {height: 100%; border-radius: 2px; background: #1DB954;}
+      .mood {font-size: 0.8rem; opacity: 0.75; margin: -0.4rem 0 0.8rem 0;}
+      .mood .tag {margin-top: 0;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -99,6 +108,7 @@ def render_card(rank, row, details):
           <div class="score">
             match {row['similarity']:.2f}<div class="bar"><div style="width:{match:.0f}%"></div></div>
             <div style="margin-top:0.35rem">popularity {int(row['track_popularity'])}</div>
+            <div>energy {row['energy']:.2f} · positivity {row['valence']:.2f}</div>
           </div>
         </div>
         """,
@@ -123,21 +133,34 @@ st.pills("Try", EXAMPLES, key="example", on_change=use_example, label_visibility
 
 with st.expander("Settings"):
     top_k = st.slider("Number of results", 1, 50, 10)
-    hybrid = st.toggle("Boost popular songs (hybrid ranking)", value=True)
+    popularity = st.toggle("Boost popular songs", value=True)
     alpha = st.slider(
-        "Semantic weight (alpha)", 0.0, 1.0, 0.8, 0.05, disabled=not hybrid,
+        "Semantic weight (alpha)", 0.0, 1.0, 0.8, 0.05, disabled=not popularity,
         help="1.0 = pure semantic similarity, 0.0 = pure popularity.",
     )
+    use_mood = st.toggle(
+        "Match mood using audio features", value=True,
+        help="Mood words in your query (calm, sad, happy, workout, dance, acoustic…) are matched "
+        "against each song's measured energy, valence, danceability and acousticness.",
+    )
+    mood_weight = st.slider("Mood weight", 0.0, 1.0, 0.3, 0.05, disabled=not use_mood)
 
 if query.strip():
     try:
         index, model = get_index(), get_model()
-    except FileNotFoundError as err:
+    except (FileNotFoundError, ValueError) as err:
         st.error(str(err))
         st.stop()
     with st.spinner("Searching…"):
-        results = search(query, top_k=top_k, alpha=alpha, hybrid=hybrid, index=index, model=model)
+        results = search(
+            query, top_k=top_k, alpha=alpha if popularity else 1.0, hybrid=popularity or use_mood,
+            mood_weight=mood_weight if use_mood else 0.0, index=index, model=model,
+        )
     details = get_details()
     st.caption(f"Top {len(results)} results for “{query.strip()}”")
+    mood = results.attrs["mood"]
+    if mood:
+        chips = "".join(f'<span class="tag">{MOOD_LABELS[(f, d)]}</span>' for f, d in mood.items())
+        st.markdown(f'<div class="mood">Mood detected: {chips}</div>', unsafe_allow_html=True)
     for rank, (_, row) in enumerate(results.iterrows(), start=1):
         render_card(rank, row, details)
