@@ -5,7 +5,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from retrieval import BASE_DIR, METADATA_PATH, cosine_similarity, first_unique, hybrid_rank, load_index, semantic_rank
+from retrieval import (
+    BASE_DIR,
+    METADATA_PATH,
+    MOOD_FEATURES,
+    cosine_similarity,
+    first_unique,
+    hybrid_rank,
+    load_index,
+    mood_targets,
+    semantic_rank,
+)
 from search import validate
 
 HAS_INDEX = METADATA_PATH.exists() and (BASE_DIR / "song_embeddings.npy").exists()
@@ -22,6 +32,7 @@ def catalog():
             "track_name": [f"Song {i}" for i in range(n)],
             "track_artist": [f"Artist {i}" for i in range(n)],
             "track_popularity": rng.integers(0, 101, n),
+            **{f: rng.random(n) for f in MOOD_FEATURES},
         }
     )
     similarities = rng.random(n)
@@ -83,6 +94,58 @@ def test_duplicate_songs_are_collapsed(catalog):
         assert (best[0] in idx) + (best[1] in idx) == 1
 
 
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("sad acoustic ballad", {"energy": -1, "valence": -1, "acousticness": 1}),
+        ("happy energetic songs for a workout", {"energy": 1, "valence": 1, "danceability": 1}),
+        ("Relaxing music to STUDY to", {"energy": -1}),
+        ("songs for a late-night drive", {}),
+        ("taylor swift", {}),
+        ("calm but energetic", {}),  # conflicting keywords cancel out
+    ],
+)
+def test_mood_targets(query, expected):
+    assert mood_targets(query) == expected
+
+
+def test_mood_targets_match_word_starts_only():
+    # prefix match: "sadly" counts as "sad", but "ambassador" (sad mid-word) does not
+    assert mood_targets("sadly") == {"valence": -1}
+    assert mood_targets("ambassador") == {}
+
+
+def test_mood_rerank_prefers_matching_audio_features(catalog):
+    metadata, sims = catalog
+    plain, _, _ = hybrid_rank(metadata, sims, top_k=10)
+    calm, _, _ = hybrid_rank(metadata, sims, top_k=10, mood={"energy": -1}, mood_weight=0.5)
+    assert metadata.iloc[calm]["energy"].mean() < metadata.iloc[plain]["energy"].mean()
+
+
+def test_mood_weight_zero_is_a_no_op(catalog):
+    metadata, sims = catalog
+    plain, _, _ = hybrid_rank(metadata, sims, top_k=10)
+    same, _, _ = hybrid_rank(metadata, sims, top_k=10, mood={"energy": -1}, mood_weight=0.0)
+    assert list(plain) == list(same)
+
+
+def test_mood_uses_larger_candidate_pool(catalog):
+    metadata, sims = catalog
+    pool = set(np.argsort(sims)[::-1][:200])
+    idx, _, _ = hybrid_rank(metadata, sims, top_k=10, alpha=1.0, mood={"energy": -1}, mood_weight=1.0)
+    assert set(idx) <= pool
+    assert not set(idx) <= set(np.argsort(sims)[::-1][:100])
+
+
+def test_load_index_rejects_stale_metadata(tmp_path):
+    np.save(tmp_path / "e.npy", np.zeros((1, 3), dtype=np.float32))
+    pd.DataFrame({"track_id": ["a"], "track_name": ["x"], "track_artist": ["y"], "track_popularity": [1]}).to_csv(
+        tmp_path / "m.csv", index=False
+    )
+    with pytest.raises(ValueError, match="embed.py"):
+        load_index(tmp_path / "e.npy", tmp_path / "m.csv")
+
+
 def test_first_unique_empty():
     metadata = pd.DataFrame({"track_name": [], "track_artist": []})
     assert len(first_unique(metadata, np.array([], dtype=int), 10)) == 0
@@ -95,6 +158,12 @@ def test_first_unique_empty():
 def test_validate_rejects_bad_input(query, top_k, alpha):
     with pytest.raises(ValueError):
         validate(query, top_k, alpha)
+
+
+@pytest.mark.parametrize("mood_weight", [-0.1, 1.5])
+def test_validate_rejects_bad_mood_weight(mood_weight):
+    with pytest.raises(ValueError):
+        validate("rock", 10, 0.8, mood_weight)
 
 
 def test_validate_accepts_good_input():
@@ -110,7 +179,9 @@ def test_load_index_missing_files_has_helpful_error(tmp_path):
 # --- CLI error paths (fail before the model loads, so they're fast) ---
 
 
-@pytest.mark.parametrize("args", [["   "], ["rock", "--top-k", "0"], ["rock", "--alpha", "2"]])
+@pytest.mark.parametrize(
+    "args", [["   "], ["rock", "--top-k", "0"], ["rock", "--alpha", "2"], ["rock", "--mood-weight", "-1"]]
+)
 def test_cli_rejects_bad_input(args):
     proc = subprocess.run([sys.executable, str(BASE_DIR / "search.py"), *args], capture_output=True, text=True)
     assert proc.returncode == 2
@@ -135,9 +206,23 @@ def test_search_end_to_end(loaded, hybrid):
     index, model = loaded
     results = search("songs for a late-night drive", hybrid=hybrid, index=index, model=model)
     assert len(results) == 10
-    assert list(results.columns) == ["track_id", "track_name", "track_artist", "track_popularity", "similarity", "score"]
+    assert list(results.columns) == [
+        "track_id", "track_name", "track_artist", "track_popularity", *MOOD_FEATURES, "similarity", "score"
+    ]
     assert not results.duplicated(["track_name", "track_artist"]).any()
     assert results["similarity"].between(-1, 1).all()
+
+
+@needs_index
+def test_search_mood_lowers_energy_for_calm_query(loaded):
+    from search import search
+
+    index, model = loaded
+    q = "calm and dreamy for studying late at night"
+    without = search(q, mood_weight=0.0, index=index, model=model)
+    with_mood = search(q, mood_weight=0.5, index=index, model=model)
+    assert with_mood.attrs["mood"] == {"energy": -1}
+    assert with_mood["energy"].mean() < without["energy"].mean()
 
 
 @needs_index
